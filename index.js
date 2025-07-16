@@ -31,7 +31,10 @@ app.get("/health", (req, res) => {
 
 // Routes
 import conversationRoutes from "./routes/conversation.js";
+import authRoutes from "./routes/auth.js";
+
 app.use("/api/conversation", conversationRoutes);
+app.use("/api/auth", authRoutes);
 
 // Error handling middleware
 app.use(errorLogger);

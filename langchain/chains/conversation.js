@@ -3,26 +3,7 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { JsonOutputParser } from "@langchain/core/output_parsers";
 import { DOCTOR_STAGES, EMERGENCY_KEYWORDS, EMERGENCY_RESPONSE } from "../prompts/conversation.js";
 import Logger from "../../middleware/logger.js";
-import mongoose from "mongoose";
-
-// Define MongoDB schema for conversations
-const ConversationSchema = new mongoose.Schema({
-  sessionId: { type: String, required: true, index: true },
-  messages: [
-    {
-      role: { type: String, enum: ["user", "assistant", "system"] },
-      content: { type: String },
-      timestamp: { type: Date, default: Date.now }
-    }
-  ],
-  stage: { type: String, default: "greeting" },
-  detectedSymptoms: [String],
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-// Create MongoDB model
-const ConversationModel = mongoose.model("Conversation", ConversationSchema);
+import ConversationModel from "../../models/conversation.js";
 
 // Define all stages in order
 const STAGE_ORDER = [
@@ -30,7 +11,6 @@ const STAGE_ORDER = [
   DOCTOR_STAGES.SYMPTOM_COLLECTION,
   DOCTOR_STAGES.DETAILED_ASSESSMENT,
   DOCTOR_STAGES.MEDICAL_HISTORY,
-  DOCTOR_STAGES.ANALYSIS,
   DOCTOR_STAGES.RECOMMENDATIONS,
   DOCTOR_STAGES.FOLLOW_UP,
 ];
@@ -55,7 +35,6 @@ Here are the stages of our consultation process:
 2. SYMPTOM_COLLECTION: Gather initial symptoms and basic information.
 3. DETAILED_ASSESSMENT: Ask targeted questions to better understand symptoms.
 4. MEDICAL_HISTORY: Inquire about relevant medical history, allergies, medications.
-5. ANALYSIS: Provide a preliminary assessment based on collected information.
 6. RECOMMENDATIONS: Suggest home care, medications, or professional consultation.
 7. FOLLOW_UP: Discuss follow-up care and answer remaining questions.
 
@@ -73,12 +52,16 @@ Remember to:
 `;
 
 class ConversationChain {
-  constructor() {
+  constructor(apiKey = null) {
     Logger.info("Initializing ConversationChain with Gemini...");
+
+    if (!apiKey) {
+      throw new Error("Gemini API key is required");
+    }
 
     this.model = new ChatGoogleGenerativeAI({
       model: "gemini-2.0-flash-exp",
-      apiKey: "AIzaSyAITerz1meD4PTo6oy2l4iV5V7ZiCHb0no",
+      apiKey: apiKey,
       temperature: 0.7
     });
 
@@ -166,20 +149,12 @@ class ConversationChain {
         
         conversation.detectedSymptoms.push(...newSymptoms);
       }
-      
+
+      Logger.info("Current Stage:", parsedResponse.current_stage);
       // Update the current stage from AI response if provided
-      if (parsedResponse.current_stage && STAGE_ORDER.includes(parsedResponse.current_stage)) {
+      if (parsedResponse.current_stage && STAGE_ORDER.includes(parsedResponse.current_stage.toLowerCase())) {
         conversation.stage = parsedResponse.current_stage;
         Logger.info(`Current stage from AI: ${conversation.stage}`);
-      }
-      
-      // Advance stage if needed
-      if (parsedResponse.next_stage === true) {
-        const currentIndex = STAGE_ORDER.indexOf(conversation.stage);
-        if (currentIndex !== -1 && currentIndex < STAGE_ORDER.length - 1) {
-          conversation.stage = STAGE_ORDER[currentIndex + 1];
-          Logger.info(`Advanced to stage: ${conversation.stage}`);
-        }
       }
 
       // Save the changes
@@ -246,12 +221,6 @@ class ConversationChain {
       // Get the response text from the model
       const responseText = modelResponse.content;
       
-      // Save messages to conversation history
-      conversation.messages.push(
-        { role: "user", content: input, timestamp: new Date() },
-        { role: "assistant", content: responseText, timestamp: new Date() }
-      );
-      
       // Try to parse as JSON, or create a basic response object if parsing fails
       let response;
       try {
@@ -260,12 +229,46 @@ class ConversationChain {
         Logger.warn("Failed to parse AI response as JSON:", error.message);
         Logger.warn("Raw response:", responseText);
         
-        // Extract what appears to be the message content
-        const messageMatch = responseText.match(/["']message["']\s*:\s*["'](.+?)["']/);
-        const message = messageMatch ? messageMatch[1] : "I'm processing your information.";
+        // Try to extract JSON from the response text manually
+        let extractedMessage = responseText;
+        
+        // Look for JSON object in the response
+        const jsonMatch = responseText.match(/\{[\s\S]*?\}/);
+        if (jsonMatch) {
+          try {
+            const parsedJson = JSON.parse(jsonMatch[0]);
+            if (parsedJson.message) {
+              extractedMessage = parsedJson.message;
+            }
+          } catch (parseError) {
+            Logger.warn("Failed to parse extracted JSON:", parseError);
+          }
+        }
+        
+        // If still no valid message, try regex patterns
+        if (extractedMessage === responseText) {
+          const messagePatterns = [
+            /["']message["']\s*:\s*["'](.*?)["']/,
+            /message:\s*["'](.*?)["']/,
+            /message["']\s*:\s*["'](.*?)["']/
+          ];
+          
+          for (const pattern of messagePatterns) {
+            const match = responseText.match(pattern);
+            if (match && match[1]) {
+              extractedMessage = match[1];
+              break;
+            }
+          }
+        }
+        
+        // If we still have JSON-like text, treat the whole response as the message
+        if (extractedMessage === responseText && responseText.includes('{')) {
+          extractedMessage = "I'm processing your information. Could you please provide more details about your symptoms?";
+        }
         
         response = {
-          message,
+          message: extractedMessage,
           current_stage: conversation.stage,
           next_stage: false,
           detected_symptoms: [],
@@ -273,6 +276,12 @@ class ConversationChain {
           suggested_followup: "Could you please tell me more about your symptoms?"
         };
       }
+
+      // Save messages to conversation history - use the parsed message content, not the raw response
+      conversation.messages.push(
+        { role: "user", content: input, timestamp: new Date() },
+        { role: "assistant", content: response.message, timestamp: new Date() }
+      );
       
       // Process and return response
       return this.processResponse(response, conversation);
@@ -307,6 +316,6 @@ class ConversationChain {
 
 export default ConversationChain;
 
-export const createConversationChain = () => {
-  return new ConversationChain();
+export const createConversationChain = (apiKey) => {
+  return new ConversationChain(apiKey);
 };

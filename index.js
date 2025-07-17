@@ -16,7 +16,7 @@ connectDB();
 // Middleware
 app.use(cors({
   origin: ['https://docongoai.vercel.app', 'http://localhost:3000'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true
 }));
 app.use(express.json());
